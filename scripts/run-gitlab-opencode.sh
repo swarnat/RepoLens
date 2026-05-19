@@ -29,7 +29,8 @@ Options:
   --project <path>   Checkout directory inside the container.
                      Default: $REPOLENS_PROJECT_DIR or ~/news-server
   --agent <agent>    RepoLens agent. Default: $REPOLENS_AGENT or opencode
-  --domain <domain>  RepoLens domain. Default: $REPOLENS_DOMAIN or security
+  --mode <mode>      Optional RepoLens mode. Uses RepoLens default if omitted.
+  --domain <domain>  Optional RepoLens domain. Default: $REPOLENS_DOMAIN or security
   --branch <name>    Optional branch, tag, or ref to checkout.
   --local            Pass --local to RepoLens instead of filing GitLab issues.
   -h, --help         Show this help text.
@@ -51,10 +52,16 @@ repo_url="${GITLAB_REPO:-}"
 token="${GITLAB_TOKEN:-}"
 project_dir="${REPOLENS_PROJECT_DIR:-$HOME/news-server}"
 agent="${REPOLENS_AGENT:-opencode}"
+mode="${REPOLENS_MODE:-}"
 domain="${REPOLENS_DOMAIN:-security}"
+mode_or_domain_set=0
 branch=""
 local_mode=0
 extra_args=()
+
+if [[ -n "${REPOLENS_MODE:-}" && -n "${REPOLENS_DOMAIN:-}" ]]; then
+  die "Use either REPOLENS_MODE or REPOLENS_DOMAIN, not both"
+fi
 
 while (($#)); do
   case "$1" in
@@ -78,9 +85,20 @@ while (($#)); do
       agent="$2"
       shift 2
       ;;
+    --mode)
+      [[ $# -ge 2 ]] || die "--mode requires a value"
+      [[ -z "${REPOLENS_DOMAIN:-}" ]] || die "Use either --mode or REPOLENS_DOMAIN, not both"
+      (( mode_or_domain_set == 0 )) || die "Use either --mode or --domain, not both"
+      mode="$2"
+      mode_or_domain_set=1
+      shift 2
+      ;;
     --domain)
       [[ $# -ge 2 ]] || die "--domain requires a value"
+      [[ -z "${REPOLENS_MODE:-}" ]] || die "Use either --domain or REPOLENS_MODE, not both"
+      (( mode_or_domain_set == 0 )) || die "Use either --mode or --domain, not both"
       domain="$2"
+      mode_or_domain_set=1
       shift 2
       ;;
     --branch|--ref)
@@ -155,7 +173,12 @@ clone_args+=("$repo_url" "$project_dir")
 git "${clone_args[@]}" || die "git clone failed"
 git -C "$project_dir" remote set-url origin "$repo_url" || true
 
-repolens_args=(-y --project "$project_dir" --agent "$agent" --domain "$domain")
+repolens_args=(-y --project "$project_dir" --agent "$agent")
+if [[ -n "$mode" ]]; then
+  repolens_args+=(--mode "$mode")
+else
+  repolens_args+=(--domain "$domain")
+fi
 if ((local_mode)); then
   repolens_args+=(--local)
 fi
