@@ -47,7 +47,10 @@ RUN useradd --create-home --home-dir /home/repolens --shell /bin/bash repolens;
 
 WORKDIR /opt/repolens
 COPY --chown=repolens:repolens . /opt/repolens
-RUN chmod +x /opt/repolens/repolens.sh /opt/repolens/scripts/run-gitlab-opencode.sh
+RUN chmod +x /opt/repolens/repolens.sh /opt/repolens/scripts/run-gitlab-opencode.sh; \
+    mkdir /project; \
+    chown repolens:repolens /project; \
+    chown repolens:repolens /home/repolens/.config
 
 USER repolens
 ENTRYPOINT ["/opt/repolens/scripts/run-gitlab-opencode.sh"]

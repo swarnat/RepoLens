@@ -27,7 +27,7 @@ Required:
 
 Options:
   --project <path>   Checkout directory inside the container.
-                     Default: $REPOLENS_PROJECT_DIR or ~/news-server
+                     Default: $REPOLENS_PROJECT_DIR or /project
   --agent <agent>    RepoLens agent. Default: $REPOLENS_AGENT or opencode
   --mode <mode>      Optional RepoLens mode. Uses RepoLens default if omitted.
   --domain <domain>  Optional RepoLens domain. Default: $REPOLENS_DOMAIN or security
@@ -50,7 +50,7 @@ die() {
 
 repo_url="${GITLAB_REPO:-}"
 token="${GITLAB_TOKEN:-}"
-project_dir="${REPOLENS_PROJECT_DIR:-$HOME/news-server}"
+project_dir="${REPOLENS_PROJECT_DIR:-/project}"
 agent="${REPOLENS_AGENT:-opencode}"
 mode="${REPOLENS_MODE:-}"
 domain="${REPOLENS_DOMAIN:-security}"
