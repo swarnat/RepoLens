@@ -126,6 +126,62 @@ fj -H codeberg.org auth login  # Codeberg; use your Forgejo host for self-hosted
 ./repolens.sh --project ~/my-app --agent claude --parallel --max-parallel 8
 ```
 
+### Docker: GitLab + opencode runner
+
+RepoLens also ships a container entry point for GitLab repositories. The image
+contains RepoLens, `opencode`, `glab`, `git`, `jq`, and the runtime utilities
+RepoLens needs. The entry script accepts a GitLab HTTPS clone URL plus a token,
+checks the repository out to `~/news-server` inside the container, and runs:
+
+```bash
+repolens.sh -y --project ~/news-server/ --agent opencode --domain security
+```
+
+Build the image:
+
+```bash
+docker build -t repolens-opencode-gitlab .
+```
+
+Run it with CLI arguments:
+
+```bash
+docker run --rm \
+  -e OPENCODE_API_KEY="$OPENCODE_API_KEY" \
+  repolens-opencode-gitlab \
+  --repo "https://gitlab.com/group/news-server.git" \
+  --token "$GITLAB_TOKEN"
+```
+
+Or pass the repository and token via environment variables:
+
+```bash
+docker run --rm \
+  -e GITLAB_REPO="https://gitlab.com/group/news-server.git" \
+  -e GITLAB_TOKEN="$GITLAB_TOKEN" \
+  -e OPENCODE_API_KEY="$OPENCODE_API_KEY" \
+  repolens-opencode-gitlab
+```
+
+Useful options:
+
+- `--branch <name>` checks out a specific branch, tag, or ref.
+- `--local` forwards `--local` to RepoLens and avoids creating GitLab issues.
+- Arguments after `--` are forwarded to `repolens.sh`, for example:
+
+  ```bash
+  docker run --rm repolens-opencode-gitlab \
+    --repo "https://gitlab.com/group/news-server.git" \
+    --token "$GITLAB_TOKEN" \
+    -- --max-issues 5
+  ```
+
+The GitLab token must be allowed to clone the repository and, unless `--local`
+is used, to perform the GitLab issue/label operations RepoLens requires.
+Configure opencode credentials according to your chosen provider; one common
+non-interactive option is to pass the provider API key as an environment
+variable supported by opencode.
+
 ## Warnings & Limits
 
 RepoLens is a power tool. Before you point it at anything you care about — or anything that costs money — read this section.
