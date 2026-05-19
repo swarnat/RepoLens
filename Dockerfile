@@ -37,12 +37,14 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends /tmp/glab.deb; \
     rm -f /tmp/glab.deb; \
     rm -rf /var/lib/apt/lists/*
+    
 
 # Install opencode. The npm package is opencode-ai; the binary is opencode.
 RUN npm install -g opencode-ai \
  && npm cache clean --force
 
-RUN useradd --create-home --home-dir /home/repolens --shell /bin/bash repolens
+RUN useradd --create-home --home-dir /home/repolens --shell /bin/bash repolens; \
+    mkdir /home/repolens/.config
 
 WORKDIR /opt/repolens
 COPY --chown=repolens:repolens . /opt/repolens
