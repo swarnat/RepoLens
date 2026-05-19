@@ -1,0 +1,12 @@
+.git
+logs
+node_modules
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+.DS_Store
