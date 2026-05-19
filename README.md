@@ -166,6 +166,8 @@ docker run --rm \
 Useful options:
 
 - `--branch <name>` checks out a specific branch, tag, or ref.
+- `--mode <mode>` runs a RepoLens mode instead of the default `--domain security`.
+- `--domain <domain>` runs a specific RepoLens domain; only one of `--mode` or `--domain` is allowed.
 - `--local` forwards `--local` to RepoLens and avoids creating GitLab issues.
 - Arguments after `--` are forwarded to `repolens.sh`, for example:
 
