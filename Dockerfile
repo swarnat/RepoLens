@@ -43,8 +43,7 @@ RUN set -eux; \
 RUN npm install -g opencode-ai \
  && npm cache clean --force
 
-RUN useradd --create-home --home-dir /home/repolens --shell /bin/bash repolens; \
-    mkdir /home/repolens/.config
+RUN useradd --create-home --home-dir /home/repolens --shell /bin/bash repolens;
 
 WORKDIR /opt/repolens
 COPY --chown=repolens:repolens . /opt/repolens
