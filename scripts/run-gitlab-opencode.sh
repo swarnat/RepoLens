@@ -30,7 +30,7 @@ Options:
                      Default: $REPOLENS_PROJECT_DIR or /project
   --agent <agent>    RepoLens agent. Default: $REPOLENS_AGENT or opencode
   --mode <mode>      Optional RepoLens mode. Uses RepoLens default if omitted.
-  --domain <domain>  Optional RepoLens domain. Default: $REPOLENS_DOMAIN or security
+  --domain <domain>  Optional RepoLens domain. Default: $REPOLENS_DOMAIN
   --branch <name>    Optional branch, tag, or ref to checkout.
   --local            Pass --local to RepoLens instead of filing GitLab issues.
   -h, --help         Show this help text.
@@ -53,7 +53,7 @@ token="${GITLAB_TOKEN:-}"
 project_dir="${REPOLENS_PROJECT_DIR:-/project}"
 agent="${REPOLENS_AGENT:-opencode}"
 mode="${REPOLENS_MODE:-}"
-domain="${REPOLENS_DOMAIN:-security}"
+domain="${REPOLENS_DOMAIN:-}"
 mode_or_domain_set=0
 branch=""
 local_mode=0
