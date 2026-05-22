@@ -367,7 +367,7 @@ forge_prompt_issue_list() {
       # GitLab uses "opened" not "open"
       local gl_state="$state"
       [[ "$gl_state" == "open" ]] && gl_state="opened"
-      printf '%sglab issue list -R %s --state %s --limit 100\n' "$glab_host_prefix" "$repo" "$gl_state"
+      printf '%sglab issue list -R %s --state %s --per-page 100\n' "$glab_host_prefix" "$repo" "$gl_state"
       ;;
     tea)
       printf 'tea issues list %s --state %s --limit 100\n' \
@@ -837,11 +837,11 @@ forge_issue_list_count() {
       glab_err="$(mktemp 2>/dev/null)" || glab_err=""
       if [[ -n "$glab_err" ]]; then
         glab_out="$(GITLAB_HOST="$_glab_host" glab issue list -R "$repo" --label "$label" \
-          --state opened --limit 1000 --output json 2>"$glab_err")"
+          --opened --per-page 100 --output json 2>"$glab_err")"
         glab_rc=$?
       else
         glab_out="$(GITLAB_HOST="$_glab_host" glab issue list -R "$repo" --label "$label" \
-          --state opened --limit 1000 --output json 2>/dev/null)"
+          --opened --per-page 100 --output json 2>/dev/null)"
         glab_rc=$?
       fi
       if [[ "$glab_rc" -ne 0 ]]; then
@@ -1078,7 +1078,7 @@ _forge_glab_find_open_issue_by_title() {
 
   local search_out
   search_out="$(GITLAB_HOST="$_glab_host" glab issue list -R "$repo" --state opened \
-    --search "$title" --output json --limit 50 2>/dev/null)" || return 0
+    --search "$title" --output json --per-page 50 2>/dev/null)" || return 0
   [[ -n "$search_out" ]] || return 0
 
   local url
