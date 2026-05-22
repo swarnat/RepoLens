@@ -9,7 +9,7 @@ ENV HOME=/home/repolens \
     PATH=/home/repolens/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     REPOLENS_PROJECT_DIR=/project \
     REPOLENS_AGENT=opencode \
-    REPOLENS_DOMAIN=security
+    REPOLENS_MODE=audit
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -47,11 +47,17 @@ RUN useradd --create-home --home-dir /home/repolens --shell /bin/bash repolens;
 
 WORKDIR /opt/repolens
 COPY --chown=repolens:repolens . /opt/repolens
+
 RUN chmod +x /opt/repolens/repolens.sh /opt/repolens/scripts/run-gitlab-opencode.sh; \
     mkdir /project; \
     chown repolens:repolens /opt/repolens; \
-    chown repolens:repolens /project; \
-    chown repolens:repolens /home/repolens/.config
+    chown repolens:repolens /project;
+
+RUN chown repolens:repolens /home/repolens/.config -R; \
+    chown repolens:repolens /home/repolens/.config/opencode -R; \
+    chown repolens:repolens /home/repolens/.local -R;
+
+
 
 USER repolens
 ENTRYPOINT ["/opt/repolens/scripts/run-gitlab-opencode.sh"]
