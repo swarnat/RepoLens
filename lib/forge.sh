@@ -837,11 +837,11 @@ forge_issue_list_count() {
       glab_err="$(mktemp 2>/dev/null)" || glab_err=""
       if [[ -n "$glab_err" ]]; then
         glab_out="$(GITLAB_HOST="$_glab_host" glab issue list -R "$repo" --label "$label" \
-          --opened --per-page 100 --output json 2>"$glab_err")"
+          --per-page 100 --output json 2>"$glab_err")"
         glab_rc=$?
       else
         glab_out="$(GITLAB_HOST="$_glab_host" glab issue list -R "$repo" --label "$label" \
-          --opened --per-page 100 --output json 2>/dev/null)"
+          --per-page 100 --output json 2>/dev/null)"
         glab_rc=$?
       fi
       if [[ "$glab_rc" -ne 0 ]]; then
