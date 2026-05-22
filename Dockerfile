@@ -7,7 +7,7 @@ ARG GLAB_VERSION=1.97.0
 
 ENV HOME=/home/repolens \
     PATH=/home/repolens/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    REPOLENS_PROJECT_DIR=/home/repolens/news-server \
+    REPOLENS_PROJECT_DIR=/project \
     REPOLENS_AGENT=opencode \
     REPOLENS_DOMAIN=security
 
@@ -49,6 +49,7 @@ WORKDIR /opt/repolens
 COPY --chown=repolens:repolens . /opt/repolens
 RUN chmod +x /opt/repolens/repolens.sh /opt/repolens/scripts/run-gitlab-opencode.sh; \
     mkdir /project; \
+    chown repolens:repolens /opt/repolens; \
     chown repolens:repolens /project; \
     chown repolens:repolens /home/repolens/.config
 
