@@ -60,7 +60,7 @@ source "$SCRIPT_DIR/lib/android.sh"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/lib/forge.sh"
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 show_version() {
   local sponsors_file="$SCRIPT_DIR/config/sponsors.json"
@@ -136,6 +136,18 @@ Options:
   --focus <lens-id>       Run a single lens (e.g., "injection", "dead-code")
   --lens <lens-id>        Alias for --focus
   --domain <domain-id>    Run all lenses in one domain (e.g., "security")
+  --relevant-domains <csv>
+                          Comma-separated allowlist of domain ids — the "missing
+                          middle" between --focus (1 lens) and full fan-out.
+                          Intersects with the mode-filtered lens list. Bypassed
+                          when --focus or --domain is set (those win).
+                          Example: --relevant-domains concurrency,database
+  --scope-by-keywords     Deterministic, LLM-free pruning: substring-match the
+                          bug-report text against each domain's "keywords" field
+                          in config/domains.json (case-insensitive). Domains
+                          without a "keywords" field are always kept (back-compat).
+                          Only effective in --mode bugreport. Env var fallback:
+                          REPOLENS_SCOPE_BY_KEYWORDS=1.
   --parallel              Run lenses in parallel (one agent process per lens)
   --max-parallel <n>      Max concurrent agents in parallel mode (default: 8)
   --resume <run-id>       Resume a previous interrupted run
@@ -144,11 +156,19 @@ Options:
   --min-severity <level>  Only file findings at or above level: critical|high|medium|low
   --depth <n>             DONE streak depth per lens. Defaults: 3 for audit/feature/bugfix,
                            1 otherwise. Must be between 1 and 19.
-  --rounds <n>            Cross-lens rounds (default: 1; capped per mode —
-                           deploy/opensource/content/discover locked to 1)
-  --no-verifier           Skip the post-rounds verifier step. Defaults: ON for
-                           --mode bugreport (evidence accuracy is critical when
-                           filing bug reports); OFF for every other mode.
+  --rounds <n>            Cross-lens rounds (default: 1, except --mode
+                           bugreport which defaults to 3; only --mode bugreport
+                           supports multi-round — all other modes locked to 1)
+  --strategy <name>       Bugreport round-1 strategy: fanout (default — all
+                           lenses run as the round-1 dispatch) | waves (N
+                           triage-seeded GENERIC investigators, width =
+                           REPOLENS_WAVE_WIDTH, default 7, clamped to 1..50).
+                           Requires --mode bugreport when set to waves.
+  --no-verifier           Skip the post-rounds verifier step. The verifier
+                           runs by default for --mode bugreport (evidence
+                           accuracy is critical when filing bug reports) and
+                           is skipped by default for every other mode. Pass
+                           --no-verifier to also skip it for bugreport.
   --no-triage             Skip the pre-rounds triage step (round-0 context pack
                            for --mode bugreport). Defaults: OFF for --mode
                            bugreport; ON for every other mode (no-op there).
@@ -286,6 +306,12 @@ Environment:
                            when the CLI flag is not used.
   REPOLENS_CROSS_LINK      Fallback for --cross-link. Accepts off|comment|
                            suggest-reopen. Used only when the CLI flag is unset.
+  REPOLENS_STRATEGY        Fallback for --strategy when the CLI flag is unset.
+                           Accepted values: fanout, waves. Only meaningful for
+                           --mode bugreport.
+  REPOLENS_WAVE_WIDTH      Number of GENERIC investigators dispatched in
+                           bugreport waves round 1 (default 7, clamped to
+                           1..50).
   REPOLENS_HEARTBEAT_INTERVAL
                            Per-lens heartbeat file interval in seconds
                            (default: 15), and parallel-worker log heartbeat
@@ -333,7 +359,7 @@ EOF
 
   # Parse all domains in one jq call
   local domain_data
-  domain_data="$(jq -r '.domains | sort_by(.order)[] | .id + "|" + .name + "|" + (.mode // "code") + "|" + (.lenses | join(","))' "$domains_file")"
+  domain_data="$(jq -r '.domains | sort_by(.order)[] | .id + "|" + .name + "|" + (.mode // "code") + "|" + ([.lenses[] | if type == "string" then . else .id end] | join(","))' "$domains_file")"
 
   local code_total=0 discover_total=0 deploy_total=0 opensource_total=0 content_total=0
   local code_output="" discover_output="" deploy_output="" opensource_output="" content_output=""
@@ -398,6 +424,10 @@ AGENT=""
 MODE="audit"
 FOCUS=""
 DOMAIN_FILTER=""
+RELEVANT_DOMAINS_CSV=""
+RELEVANT_DOMAINS_SET=false
+SCOPE_BY_KEYWORDS=false
+SCOPE_BY_KEYWORDS_SET=false
 PARALLEL=false
 MAX_PARALLEL=8
 RESUME_RUN_ID=""
@@ -414,6 +444,8 @@ NO_TRIAGE=""
 NO_TRIAGE_SET=false
 CROSS_LINK_MODE=""
 CROSS_LINK_MODE_SET=false
+STRATEGY=""
+STRATEGY_SET=false
 CHANGE_STATEMENT=""
 BUG_REPORT=""
 BUG_REPORT_SET=false
@@ -468,6 +500,17 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || die "Option --domain requires an argument."
       DOMAIN_FILTER="$2"
       shift 2
+      ;;
+    --relevant-domains)
+      [[ $# -ge 2 ]] || die "Option --relevant-domains requires a comma-separated argument."
+      RELEVANT_DOMAINS_CSV="$2"
+      RELEVANT_DOMAINS_SET=true
+      shift 2
+      ;;
+    --scope-by-keywords)
+      SCOPE_BY_KEYWORDS=true
+      SCOPE_BY_KEYWORDS_SET=true
+      shift
       ;;
     --parallel)
       PARALLEL=true
@@ -524,6 +567,15 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || die "Option --cross-link requires an argument (off|comment|suggest-reopen)."
       CROSS_LINK_MODE="$2"
       CROSS_LINK_MODE_SET=true
+      shift 2
+      ;;
+    --strategy)
+      [[ $# -ge 2 ]] || die "Option --strategy requires an argument (fanout|waves)."
+      case "$2" in
+        fanout|waves) STRATEGY="$2" ;;
+        *) die "Invalid --strategy: '$2' (expected 'fanout' or 'waves')." ;;
+      esac
+      STRATEGY_SET=true
       shift 2
       ;;
     --change)
@@ -666,6 +718,24 @@ case "$MODE" in
   audit|feature|bugfix|bugreport|discover|deploy|custom|opensource|content) ;;
   *) die "Invalid mode: $MODE (expected 'audit', 'feature', 'bugfix', 'bugreport', 'discover', 'deploy', 'custom', 'opensource', or 'content')" ;;
 esac
+
+# --- Resolve --strategy (CLI flag wins over REPOLENS_STRATEGY env) ---
+# The wave-controller branch in lib/rounds.sh reads ${STRATEGY:-} to decide
+# whether round-1 dispatches a narrow set of triage-seeded GENERIC investigators
+# (waves) or the full lens list (fanout). Exporting STRATEGY here lets the
+# branch fire from parallel workers / subshells.
+if ! $STRATEGY_SET && [[ -n "${REPOLENS_STRATEGY:-}" ]]; then
+  case "$REPOLENS_STRATEGY" in
+    fanout|waves) STRATEGY="$REPOLENS_STRATEGY" ;;
+    *) die "Invalid REPOLENS_STRATEGY: '$REPOLENS_STRATEGY' (expected 'fanout' or 'waves')." ;;
+  esac
+  STRATEGY_SET=true
+fi
+[[ -n "$STRATEGY" ]] || STRATEGY="fanout"
+if [[ "$STRATEGY" == "waves" && "$MODE" != "bugreport" ]]; then
+  die "--strategy waves requires --mode bugreport (got --mode $MODE)."
+fi
+export STRATEGY
 
 parse_remote_target() {
   local target="$1"
@@ -925,6 +995,21 @@ case "$CROSS_LINK_MODE" in
 esac
 
 export CROSS_LINK_MODE
+
+# --- Resolve --scope-by-keywords (#228) ---
+# Boolean opt-in: CLI flag wins, then REPOLENS_SCOPE_BY_KEYWORDS env var,
+# then default (off). Only meaningful in --mode bugreport (the only mode
+# with a bug-report text corpus to match against).
+if $SCOPE_BY_KEYWORDS_SET; then
+  : # explicit CLI flag wins
+elif [[ -n "${REPOLENS_SCOPE_BY_KEYWORDS:-}" ]]; then
+  case "${REPOLENS_SCOPE_BY_KEYWORDS}" in
+    1|true|TRUE|True|yes|YES|on|ON)  SCOPE_BY_KEYWORDS=true ;;
+    0|false|FALSE|False|no|NO|off|OFF|"") SCOPE_BY_KEYWORDS=false ;;
+    *) SCOPE_BY_KEYWORDS=false ;;
+  esac
+fi
+export SCOPE_BY_KEYWORDS
 
 CURRENT_ROUND_INDEX=""
 CURRENT_ROUND_TOTAL=""
@@ -1552,11 +1637,11 @@ resolve_lenses() {
     local found_domain=""
     if [[ -n "$DOMAIN_FILTER" ]]; then
       found_domain="$(jq -r --arg lens "$FOCUS" --arg d "$DOMAIN_FILTER" --arg mode "$MODE" --arg deploy_domain "$deploy_domain" \
-        '.domains[] | (if $mode == "discover" then select(.mode == "discover") elif $mode == "deploy" then select(.mode == "deploy" and .id == $deploy_domain) elif $mode == "opensource" then select(.mode == "opensource") elif $mode == "content" then select(.mode == "content") else select(.mode != "discover" and .mode != "deploy" and .mode != "opensource" and .mode != "content") end) | select(.id == $d) | select(.lenses[] == $lens) | .id' "$DOMAINS_FILE" | head -1)"
+        '.domains[] | (if $mode == "discover" then select(.mode == "discover") elif $mode == "deploy" then select(.mode == "deploy" and .id == $deploy_domain) elif $mode == "opensource" then select(.mode == "opensource") elif $mode == "content" then select(.mode == "content") else select(.mode != "discover" and .mode != "deploy" and .mode != "opensource" and .mode != "content") end) | select(.id == $d) | select([.lenses[] | if type == "string" then . else .id end] | index($lens)) | .id' "$DOMAINS_FILE" | head -1)"
       [[ -n "$found_domain" ]] || die "Lens '$FOCUS' not found in domain '$DOMAIN_FILTER' (mode: $MODE)"
     else
       found_domain="$(jq -r --arg lens "$FOCUS" --arg mode "$MODE" --arg deploy_domain "$deploy_domain" \
-        '.domains[] | (if $mode == "discover" then select(.mode == "discover") elif $mode == "deploy" then select(.mode == "deploy" and .id == $deploy_domain) elif $mode == "opensource" then select(.mode == "opensource") elif $mode == "content" then select(.mode == "content") else select(.mode != "discover" and .mode != "deploy" and .mode != "opensource" and .mode != "content") end) | select(.lenses[] == $lens) | .id' "$DOMAINS_FILE" | head -1)"
+        '.domains[] | (if $mode == "discover" then select(.mode == "discover") elif $mode == "deploy" then select(.mode == "deploy" and .id == $deploy_domain) elif $mode == "opensource" then select(.mode == "opensource") elif $mode == "content" then select(.mode == "content") else select(.mode != "discover" and .mode != "deploy" and .mode != "opensource" and .mode != "content") end) | select([.lenses[] | if type == "string" then . else .id end] | index($lens)) | .id' "$DOMAINS_FILE" | head -1)"
       [[ -n "$found_domain" ]] || die "Lens '$FOCUS' not found in domains.json (mode: $MODE)"
     fi
 
@@ -1575,13 +1660,151 @@ resolve_lenses() {
     [[ -n "$domain_exists" ]] || die "Domain '$DOMAIN_FILTER' not found in domains.json (mode: $MODE)"
 
     jq -r --arg d "$DOMAIN_FILTER" \
-      '.domains[] | select(.id == $d) | .lenses[] | $d + "/" + .' "$DOMAINS_FILE"
+      '.domains[] | select(.id == $d) | .lenses[] | $d + "/" + (if type == "string" then . else .id end)' "$DOMAINS_FILE"
     return
   fi
 
   # All lenses — ordered by domain order
-  jq -r --arg mode "$MODE" --arg deploy_domain "$deploy_domain" \
-    '.domains | sort_by(.order)[] | (if $mode == "discover" then select(.mode == "discover") elif $mode == "deploy" then select(.mode == "deploy" and .id == $deploy_domain) elif $mode == "opensource" then select(.mode == "opensource") elif $mode == "content" then select(.mode == "content") else select(.mode != "discover" and .mode != "deploy" and .mode != "opensource" and .mode != "content") end) | .id as $d | .lenses[] | $d + "/" + .' "$DOMAINS_FILE"
+  local _all_lenses
+  _all_lenses="$(jq -r --arg mode "$MODE" --arg deploy_domain "$deploy_domain" \
+    '.domains | sort_by(.order)[] | (if $mode == "discover" then select(.mode == "discover") elif $mode == "deploy" then select(.mode == "deploy" and .id == $deploy_domain) elif $mode == "opensource" then select(.mode == "opensource") elif $mode == "content" then select(.mode == "content") else select(.mode != "discover" and .mode != "deploy" and .mode != "opensource" and .mode != "content") end) | .id as $d | .lenses[] | (if type == "string" then {id: ., skip_modes: []} else . end) | select(((.skip_modes // []) | index($mode)) | not) | $d + "/" + .id' "$DOMAINS_FILE")"
+
+  # Issue #228: --relevant-domains <csv> deterministic allowlist. Operator-given
+  # CSV of domain ids; intersects with the mode-filtered lens list. Validated
+  # against the mode's domain whitelist so typos or wrong-mode ids fail loudly.
+  if [[ "$RELEVANT_DOMAINS_SET" == "true" ]]; then
+    local -A _rd_allowed=()
+    local _rd_allow_id
+    while IFS= read -r _rd_allow_id; do
+      [[ -z "$_rd_allow_id" ]] && continue
+      _rd_allowed["$_rd_allow_id"]=1
+    done < <(jq -r --arg mode "$MODE" --arg deploy_domain "$deploy_domain" \
+      '.domains[] | (if $mode == "discover" then select(.mode == "discover") elif $mode == "deploy" then select(.mode == "deploy" and .id == $deploy_domain) elif $mode == "opensource" then select(.mode == "opensource") elif $mode == "content" then select(.mode == "content") else select(.mode != "discover" and .mode != "deploy" and .mode != "opensource" and .mode != "content") end) | .id' "$DOMAINS_FILE")
+
+    local -A _rd_keep=()
+    local _rd_token _rd_count=0
+    local _rd_csv="$RELEVANT_DOMAINS_CSV"
+    local -a _rd_arr=()
+    IFS=',' read -ra _rd_arr <<< "$_rd_csv"
+    for _rd_token in "${_rd_arr[@]}"; do
+      # Trim whitespace
+      _rd_token="${_rd_token#"${_rd_token%%[![:space:]]*}"}"
+      _rd_token="${_rd_token%"${_rd_token##*[![:space:]]}"}"
+      [[ -z "$_rd_token" ]] && continue
+      if [[ -z "${_rd_allowed[$_rd_token]:-}" ]]; then
+        die "--relevant-domains: unknown or wrong-mode domain id '$_rd_token' (mode: $MODE)"
+      fi
+      _rd_keep["$_rd_token"]=1
+      _rd_count=$((_rd_count + 1))
+    done
+
+    if (( _rd_count == 0 )); then
+      die "--relevant-domains: CSV contains no valid domain ids: '$RELEVANT_DOMAINS_CSV'"
+    fi
+
+    local _rd_pruned="" _rd_entry _rd_entry_domain
+    while IFS= read -r _rd_entry; do
+      [[ -z "$_rd_entry" ]] && continue
+      _rd_entry_domain="${_rd_entry%%/*}"
+      if [[ -n "${_rd_keep[$_rd_entry_domain]:-}" ]]; then
+        _rd_pruned+="$_rd_entry"$'\n'
+      fi
+    done <<< "$_all_lenses"
+    _rd_pruned="${_rd_pruned%$'\n'}"
+    _all_lenses="$_rd_pruned"
+  fi
+
+  # Issue #228: --scope-by-keywords deterministic, LLM-free pruning. Substring
+  # match the bug-report text (case-insensitive) against each domain's
+  # "keywords" field. Missing/empty keywords → keep (back-compat). Zero match
+  # across the whole set → fall through with no pruning (avoid empty lens list).
+  if [[ "$SCOPE_BY_KEYWORDS" == "true" && "$MODE" == "bugreport" && -n "${BUG_REPORT:-}" ]]; then
+    local _kw_bug_lower
+    _kw_bug_lower="$(printf '%s' "$BUG_REPORT" | tr '[:upper:]' '[:lower:]')"
+
+    local -A _kw_keep=()
+    local -a _kw_parts=()
+    local _kw_dom _kw_match _kw_i _kw_w
+    while IFS=$'\t' read -r -a _kw_parts; do
+      _kw_dom="${_kw_parts[0]:-}"
+      [[ -z "$_kw_dom" ]] && continue
+      if (( ${#_kw_parts[@]} <= 1 )); then
+        # No keywords field (or empty list) — back-compat: always keep.
+        _kw_keep["$_kw_dom"]=1
+        continue
+      fi
+      _kw_match=0
+      for (( _kw_i = 1; _kw_i < ${#_kw_parts[@]}; _kw_i++ )); do
+        _kw_w="${_kw_parts[$_kw_i]}"
+        [[ -z "$_kw_w" ]] && continue
+        if [[ "$_kw_bug_lower" == *"$_kw_w"* ]]; then
+          _kw_match=1
+          break
+        fi
+      done
+      if (( _kw_match == 1 )); then
+        _kw_keep["$_kw_dom"]=1
+      fi
+    done < <(jq -r --arg mode "$MODE" --arg deploy_domain "$deploy_domain" '
+      .domains[]
+      | (if $mode == "discover" then select(.mode == "discover")
+         elif $mode == "deploy" then select(.mode == "deploy" and .id == $deploy_domain)
+         elif $mode == "opensource" then select(.mode == "opensource")
+         elif $mode == "content" then select(.mode == "content")
+         else select(.mode != "discover" and .mode != "deploy" and .mode != "opensource" and .mode != "content")
+         end)
+      | [.id] + ((.keywords // []) | map(ascii_downcase))
+      | @tsv
+    ' "$DOMAINS_FILE")
+
+    if (( ${#_kw_keep[@]} > 0 )); then
+      local _kw_pruned="" _kw_entry _kw_entry_domain
+      while IFS= read -r _kw_entry; do
+        [[ -z "$_kw_entry" ]] && continue
+        _kw_entry_domain="${_kw_entry%%/*}"
+        if [[ -n "${_kw_keep[$_kw_entry_domain]:-}" ]]; then
+          _kw_pruned+="$_kw_entry"$'\n'
+        fi
+      done <<< "$_all_lenses"
+      _kw_pruned="${_kw_pruned%$'\n'}"
+      if [[ -n "$_kw_pruned" ]]; then
+        _all_lenses="$_kw_pruned"
+      fi
+    fi
+  fi
+
+  # Bugreport mode: when the triage agent has produced a relevant-domains
+  # whitelist, intersect by domain prefix. Missing-or-empty file → full
+  # fanout (the safe path: matches behavior pre-issue #227 and avoids the
+  # zero-lens edge case from agent over-pruning).
+  local _relevant_file="${LOG_BASE:-}/triage/relevant-domains.txt"
+  if [[ "$MODE" == "bugreport" && -s "$_relevant_file" ]]; then
+    local -A _keep=()
+    local _dom_keep _kept_count=0
+    while IFS= read -r _dom_keep; do
+      [[ -z "$_dom_keep" ]] && continue
+      _keep["$_dom_keep"]=1
+      _kept_count=$((_kept_count + 1))
+    done < "$_relevant_file"
+
+    if (( _kept_count > 0 )); then
+      local _pruned _entry _entry_domain
+      _pruned=""
+      while IFS= read -r _entry; do
+        [[ -z "$_entry" ]] && continue
+        _entry_domain="${_entry%%/*}"
+        if [[ -n "${_keep[$_entry_domain]:-}" ]]; then
+          _pruned+="$_entry"$'\n'
+        fi
+      done <<< "$_all_lenses"
+      _pruned="${_pruned%$'\n'}"
+      if [[ -n "$_pruned" ]]; then
+        _all_lenses="$_pruned"
+      fi
+    fi
+  fi
+
+  printf '%s\n' "$_all_lenses"
 }
 
 LENS_LIST=()
@@ -2139,6 +2362,9 @@ if $DRY_RUN; then
   echo "Agent:        $AGENT"
   echo "Project:      $PROJECT_PATH"
   echo "Rounds:      $ROUNDS"
+  if [[ "$MODE" == "bugreport" ]]; then
+    echo "Strategy:     $STRATEGY"
+  fi
   echo "Lenses:       $TOTAL_LENSES"
   if [[ -n "$REMOTE_TARGET" ]]; then
     if [[ -n "$REMOTE_KEY" ]]; then
@@ -2266,7 +2492,16 @@ start_status_updater "$RUN_ID" "$LOG_BASE" "$HEARTBEAT_DIR" "$completed_lenses_f
 
 # --- Run a single lens ---
 run_lens() {
-  local lens_entry="$1"
+  local lens_tuple="$1"
+  local lens_entry="" lens_role="" lens_focus="" prior_finding_anchor="" exclusion_hints=""
+
+  if declare -F _rounds_meta_tuple_parse >/dev/null 2>&1; then
+    _rounds_meta_tuple_parse "$lens_tuple" lens_entry lens_role lens_focus prior_finding_anchor exclusion_hints
+  else
+    lens_entry="${lens_tuple%%|*}"
+  fi
+  [[ -n "$lens_entry" ]] || lens_entry="$lens_tuple"
+
   local domain="${lens_entry%%/*}"
   local lens_id="${lens_entry#*/}"
   local lens_file="$LENSES_DIR/$domain/$lens_id.md"
@@ -2276,6 +2511,13 @@ run_lens() {
       && -n "${CURRENT_ROUND_CUSTOM_LENSES_DIR:-}" \
       && -f "${CURRENT_ROUND_CUSTOM_LENSES_DIR}/$domain/$lens_id.md" ]]; then
     lens_file="${CURRENT_ROUND_CUSTOM_LENSES_DIR}/$domain/$lens_id.md"
+  fi
+
+  if [[ "$domain" == "generic" ]]; then
+    base_file="$BASE_PROMPTS_DIR/investigator.md"
+    if [[ ! -f "$lens_file" ]]; then
+      lens_file="$base_file"
+    fi
   fi
 
   # Check resume
@@ -2329,6 +2571,10 @@ run_lens() {
   vars+="|FORGE_ISSUE_LIST_CLOSED=$(forge_prompt_issue_list "closed" "$FORGE_REPO_SLUG" "$PROJECT_PATH")"
   [[ -n "${CURRENT_ROUND_INDEX:-}" ]] && vars+="|ROUND_INDEX=${CURRENT_ROUND_INDEX}"
   [[ -n "${CURRENT_ROUND_TOTAL:-}" ]] && vars+="|ROUND_TOTAL=${CURRENT_ROUND_TOTAL}"
+  vars+="|LENS_ROLE=$(template_var_escape "$lens_role")"
+  vars+="|LENS_FOCUS=$(template_var_escape "$lens_focus")"
+  vars+="|PRIOR_FINDING_ANCHOR=$(template_var_escape "$prior_finding_anchor")"
+  vars+="|EXCLUSION_HINTS=$(template_var_escape "$exclusion_hints")"
   if [[ -n "${PRIOR_ROUND_DIGEST_FILE:-}" ]]; then
     vars+="|PRIOR_ROUND_DIGEST=@${PRIOR_ROUND_DIGEST_FILE}"
   fi
@@ -2693,6 +2939,37 @@ if [[ "$MODE" == "bugreport" && "${NO_TRIAGE:-true}" != "true" ]]; then
   fi
 fi
 
+# Issue #227: re-prune LENS_LIST against the relevant-domains whitelist that
+# triage just produced. resolve_lenses already consults the file (used by the
+# resume path), but on a fresh run LENS_LIST was computed before triage. Only
+# applies when the catch-all branch was taken — explicit --focus / --domain
+# user overrides bypass the whitelist entirely.
+if [[ "$MODE" == "bugreport" && -z "$FOCUS" && -z "$DOMAIN_FILTER" \
+      && -s "$LOG_BASE/triage/relevant-domains.txt" ]]; then
+  declare -A _RELEVANT_DOMAINS_KEEP=()
+  while IFS= read -r _relevant_domain_id; do
+    [[ -z "$_relevant_domain_id" ]] && continue
+    _RELEVANT_DOMAINS_KEEP["$_relevant_domain_id"]=1
+  done < "$LOG_BASE/triage/relevant-domains.txt"
+
+  if (( ${#_RELEVANT_DOMAINS_KEEP[@]} > 0 )); then
+    _PRUNED_LENS_LIST=()
+    for _lens_entry in "${LENS_LIST[@]}"; do
+      _lens_entry_domain="${_lens_entry%%/*}"
+      if [[ -n "${_RELEVANT_DOMAINS_KEEP[$_lens_entry_domain]:-}" ]]; then
+        _PRUNED_LENS_LIST+=("$_lens_entry")
+      fi
+    done
+    if (( ${#_PRUNED_LENS_LIST[@]} > 0 )); then
+      _ORIGINAL_LENS_COUNT="${#LENS_LIST[@]}"
+      LENS_LIST=("${_PRUNED_LENS_LIST[@]}")
+      TOTAL_LENSES=${#LENS_LIST[@]}
+      log_info "Triage relevant-domains filter: pruned $((_ORIGINAL_LENS_COUNT - TOTAL_LENSES))/$_ORIGINAL_LENS_COUNT lenses, kept $TOTAL_LENSES"
+    fi
+  fi
+  unset _RELEVANT_DOMAINS_KEEP _PRUNED_LENS_LIST _lens_entry _lens_entry_domain _relevant_domain_id _ORIGINAL_LENS_COUNT
+fi
+
 # --- Execute lenses ---
 if [[ "$RUN_ROUNDS_RC" -eq 0 ]]; then
   run_rounds "$ROUNDS" LENS_LIST
@@ -2720,7 +2997,7 @@ fi
 # Multi-round runs finish by consolidating round findings into a schema-checked
 # manifest under logs/<run-id>/final/manifest.json. Single-round runs keep the
 # legacy direct-filing/local-output behavior.
-if [[ "$RUN_ROUNDS_RC" -eq 0 && "${ROUNDS:-1}" -gt 1 ]]; then
+if [[ "$RUN_ROUNDS_RC" -eq 0 && "$MODE" == "bugreport" && "${ROUNDS:-1}" -gt 1 ]]; then
   log_info "Synthesizer: consolidating multi-round findings"
   if run_synthesizer "$RUN_ID"; then
     log_info "Synthesizer: manifest.json promoted"
@@ -2792,6 +3069,18 @@ if [[ "$RUN_ROUNDS_RC" -eq 0 && "${ROUNDS:-1}" -gt 1 ]]; then
 fi
 
 # --- Finalize ---
+# Emit deduped forge-warning rollup so the operator still sees the suppressed
+# total (issue #246). Parallel workers carry their own _FORGE_WARN_SEEN map and
+# their counts don't cross fork boundaries — what we report here is what the
+# parent process accumulated (baseline calls plus anything that ran serially).
+if declare -p _FORGE_WARN_SEEN >/dev/null 2>&1 && (( ${#_FORGE_WARN_SEEN[@]} > 0 )); then
+  log_info "Forge warning rollup (deduped):"
+  while IFS= read -r _rollup_key; do
+    log_info "  ${_rollup_key} — ${_FORGE_WARN_SEEN[$_rollup_key]} times"
+  done < <(printf '%s\n' "${!_FORGE_WARN_SEEN[@]}" | LC_ALL=C sort)
+  unset _rollup_key
+fi
+
 finalize_summary "$SUMMARY_FILE"
 set_summary_health "$SUMMARY_FILE" "$REPOLENS_DEGENERATE_THRESHOLD"
 RUN_HEALTH="$(jq -r '.health // "ok"' "$SUMMARY_FILE" 2>/dev/null || printf 'ok')"

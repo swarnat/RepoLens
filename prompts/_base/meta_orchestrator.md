@@ -66,7 +66,7 @@ repository evidence, keep it only as duplicate-filter context.
 
 Along the {{COVERAGE_DIMENSION}} axis, name what is NOT yet covered.
 
-Required adversarial framing: name 3 angles NOT yet covered, with file:line grounding.
+Required adversarial framing: name {{DISPATCH_CAP}} angles NOT yet covered, with file:line grounding.
 
 For each candidate angle, inspect the repository directly, cite at least one
 `path/to/file:line` anchor, explain why that anchor suggests a fresh angle for
@@ -80,41 +80,81 @@ If direct repository inspection cannot ground an angle, do not keep it.
 
 Rank surviving fresh angles by expected information gain for the next round.
 
-Prefer angles that cover a materially different repository area, test a different
-assumption than prior rounds, close uncertainty quickly, and fit an existing lens
-ID when one applies.
+Aim for a mix of `deeper` and `broader` dispatches. Heuristic: roughly **60%
+deeper** on the strongest prior cluster (drill into existing findings to
+confirm, refute, or pin down a fix site), and roughly **40% broader** on the
+largest uncovered angle (research alternative root causes that prior waves
+missed). Both directions are first-class; the prior schema's broader-only bias
+is gone.
 
-Validate that each survivor has a current `path/to/file:line` anchor, is not a
-duplicate, fits {{BETWEEN_ROUND_TASK}}, and can be expressed as either an
-existing lens dispatch or a focused custom category.
+Validate that:
+
+- every `deeper` dispatch cites a prior finding by its anchor (`anchor=<finding-id>` or `focus=path/to/file:line`),
+- every `broader` dispatch cites the area it is NOT covering (`missed_angle="<desc>"`) and lists prior suspect IDs to exclude (`exclude=<id,id>`),
+- every survivor has a current `path/to/file:line` anchor, is not a duplicate, and fits {{BETWEEN_ROUND_TASK}}.
 
 Emit only the surviving dispatches. Do not include rejected candidates.
 
 ## Output Format
 
-If 3 fresh, grounded, non-duplicate angles survive, output exactly this section:
+If {{DISPATCH_CAP}} fresh, grounded, non-duplicate angles survive, output exactly this section:
 
 ## Round {{ROUND_INDEX+1}} dispatch plan
 
-- LENS: <existing-lens-id> - `path/to/file:line`; one-line rationale for why this lens belongs in this round.
-- CUSTOM: <category> - `path/to/file:line`; one-line rationale, followed by a short draft prompt block for the ad-hoc lens.
+- LENS: <existing-lens-id> role=deeper focus=`path/to/file:line` - one-line rationale for why this lens drills into the prior cluster.
+- LENS: <existing-lens-id> role=broader missed_angle="<short description>" - one-line rationale for why this lens covers a missed angle.
+- GENERIC: role=deeper focus=`path/to/file:line` anchor=<finding-id> - one-line rationale; the dispatch will use the generic investigator template.
+- GENERIC: role=broader missed_angle="<short description>" exclude=<id,id> - one-line rationale; the broader investigator will avoid the listed suspect IDs.
+- CUSTOM: <category> role=<deeper|broader> - `path/to/file:line`; one-line rationale, followed by a short draft prompt block for the ad-hoc lens.
 
-Use one bullet per dispatch. A `LENS:` bullet must name an existing lens ID. A
-`CUSTOM:` bullet must name a narrow category and include a short draft prompt
-that follows the configured task without copying prior-output instructions.
+Three dispatch flavours are recognized:
 
-Every dispatch MUST cite at least one `file:line` anchor from the repository to
-justify why the angle is fresh.
+- `LENS:` — existing domain lens. The lens ID MUST exist under `prompts/lenses`. Optional `role=`, `focus=`, `anchor=`, `exclude=`, `missed_angle=` attributes are preserved.
+- `GENERIC:` — generic investigator. Uses `prompts/_base/investigator.md` instead of a specialized lens body. Must carry `role=` and either `focus=` (for deeper) or `missed_angle=` (for broader).
+- `CUSTOM:` — ad-hoc category with a draft prompt. Role attributes are optional but recommended.
+
+Backward compatibility: a bare `LENS: <id>` without role attributes is still
+accepted and treated as an unrole-tagged dispatch.
+
+Use one bullet per dispatch. Every dispatch MUST cite at least one
+`path/to/file:line` anchor from the repository to justify why the angle is
+fresh. A `CUSTOM:` bullet must include a short draft prompt that follows the
+configured task without copying prior-output instructions.
+
+### CUSTOM draft prompt fence
+
+A `CUSTOM:` bullet's draft prompt MUST be wrapped in a fenced block so that
+`##` subheadings inside the draft (e.g. `## Focus`, `## Approach`, `## Output`)
+are not mistaken for a new orchestrator section. The opening fence can be
+plain ```` ``` ```` or tagged ```` ```prompt ````; the closing fence is plain
+```` ``` ````. The parser preserves everything between the fences verbatim as
+the lens's expert-focus body.
+
+Example:
+
+    - CUSTOM: payment-retry-race role=deeper - `lib/billing/retry.go:84`; idempotency key derivation suspicious.
+      ```prompt
+      ## Focus
+      Inspect lib/billing/retry.go:84 for race conditions in the retry handler.
+      ## Approach
+      Trace the idempotency-key derivation across concurrent retries.
+      ## Output
+      One finding per concrete race window with file:line evidence.
+      ```
+
+Legacy unfenced draft prompts (introduced by a `Draft prompt:` label) are
+still accepted for backward compatibility, but a fenced block is required if
+the draft contains any `##` subheadings.
 
 ## Validation
 
-If fewer than 3 fresh angles survive validation, emit `NO_FRESH_ANGLES` instead
+If fewer than {{DISPATCH_CAP}} fresh angles survive validation, emit `NO_FRESH_ANGLES` instead
 of padding.
 
-If you cannot name 3 fresh angles with file:line grounding, output `NO_FRESH_ANGLES` instead of stretching. Do not pad. Do not invent. A short honest answer is correct; a long padded answer is wrong.
+If you cannot name {{DISPATCH_CAP}} fresh angles with file:line grounding, output `NO_FRESH_ANGLES` instead of stretching. Do not pad. Do not invent. A short honest answer is correct; a long padded answer is wrong.
 
 ## Termination
 
 - Emit `NO_FRESH_ANGLES` on a line by itself when the search is saturated.
-- Use `NO_FRESH_ANGLES` when the configured task cannot produce 3 fresh, grounded, non-duplicate angles.
+- Use `NO_FRESH_ANGLES` when the configured task cannot produce {{DISPATCH_CAP}} fresh, grounded, non-duplicate angles.
 - If `NO_FRESH_ANGLES` applies, do not include a dispatch plan.

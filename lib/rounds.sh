@@ -489,7 +489,7 @@ _rounds_meta_slug() {
 }
 
 _rounds_meta_custom_category_from_payload() {
-  local payload="$1" line trimmed category
+  local payload="$1" line trimmed category attribute_start
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     trimmed="$(_rounds_meta_trim "$line")"
@@ -499,6 +499,12 @@ _rounds_meta_custom_category_from_payload() {
       if [[ "$category" =~ ^(.+)[[:space:]]-[[:space:]] ]]; then
         category="${BASH_REMATCH[1]}"
       fi
+      # Strip any role/focus/anchor/exclude/missed_angle attributes from the
+      # category so the slug derives only from the human-named category. Use
+      # sed (POSIX BRE/ERE has no non-greedy match in Bash) to stop at the
+      # first attribute boundary.
+      category="$(printf '%s' "$category" \
+        | sed -E 's/[[:space:]]+(role|focus|anchor|exclude|missed_angle)=.*$//')"
       _rounds_meta_trim "$category"
       return 0
     fi
@@ -511,9 +517,135 @@ _rounds_meta_custom_category_from_payload() {
 _rounds_meta_dispatch_boundary() {
   local trimmed="$1"
 
-  [[ "$trimmed" =~ ^-?[[:space:]]*(LENS|CUSTOM):[[:space:]]* ]] \
+  [[ "$trimmed" =~ ^-?[[:space:]]*(LENS|CUSTOM|GENERIC):[[:space:]]* ]] \
     || [[ "$trimmed" =~ ^#*[[:space:]]*HYPOTHESES[_[:space:]-]*TO[_[:space:]-]*VERIFY[[:space:]]*:?[[:space:]]* ]] \
     || [[ "$trimmed" =~ ^#{1,6}[[:space:]]+ ]]
+}
+
+_rounds_meta_tuple_escape_field() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//|/\\|}"
+  printf '%s' "$value"
+}
+
+_rounds_meta_tuple_unescape_field() {
+  local value="$1" out="" i len char next
+  len="${#value}"
+  for (( i = 0; i < len; i++ )); do
+    char="${value:i:1}"
+    if [[ "$char" == "\\" && "$((i + 1))" -lt "$len" ]]; then
+      next="${value:i+1:1}"
+      if [[ "$next" == "|" || "$next" == "\\" ]]; then
+        out+="$next"
+        i=$((i + 1))
+        continue
+      fi
+    fi
+    out+="$char"
+  done
+  printf '%s' "$out"
+}
+
+_rounds_meta_tuple_serialize() {
+  local entry="$1" role="${2:-}" focus="${3:-}" anchor="${4:-}" exclude="${5:-}"
+  local has_meta=0
+
+  [[ -n "$role" || -n "$focus" || -n "$anchor" || -n "$exclude" ]] && has_meta=1
+
+  if (( has_meta == 0 )); then
+    printf '%s' "$entry"
+    return 0
+  fi
+
+  printf '%s|%s|%s|%s|%s' \
+    "$entry" \
+    "$(_rounds_meta_tuple_escape_field "$role")" \
+    "$(_rounds_meta_tuple_escape_field "$focus")" \
+    "$(_rounds_meta_tuple_escape_field "$anchor")" \
+    "$(_rounds_meta_tuple_escape_field "$exclude")"
+}
+
+# Parse a tuple "entry|role|focus|anchor|exclude" and assign fields to
+# named variables passed by reference. Honors backslash-escaped pipes
+# inside values.
+_rounds_meta_tuple_parse() {
+  local tuple="$1" entry_var="$2" role_var="$3" focus_var="$4" anchor_var="$5" exclude_var="$6"
+  local -a fields=()
+  local current="" char next i len
+
+  len="${#tuple}"
+  for (( i = 0; i < len; i++ )); do
+    char="${tuple:i:1}"
+    if [[ "$char" == "\\" && "$((i + 1))" -lt "$len" ]]; then
+      next="${tuple:i+1:1}"
+      if [[ "$next" == "|" || "$next" == "\\" ]]; then
+        current+="$next"
+        i=$((i + 1))
+        continue
+      fi
+    fi
+    if [[ "$char" == "|" ]]; then
+      fields+=("$current")
+      current=""
+      continue
+    fi
+    current+="$char"
+  done
+  fields+=("$current")
+
+  printf -v "$entry_var" '%s' "${fields[0]:-}"
+  printf -v "$role_var" '%s' "${fields[1]:-}"
+  printf -v "$focus_var" '%s' "${fields[2]:-}"
+  printf -v "$anchor_var" '%s' "${fields[3]:-}"
+  printf -v "$exclude_var" '%s' "${fields[4]:-}"
+}
+
+# Extract a key=value pair from a line. Supports key="value with spaces",
+# key='value with spaces', key=`backtick value`, key=token (no whitespace),
+# and key=`path/to/file:line` style tokens that contain backticks.
+# Writes the extracted value to stdout. Returns 0 if the key was found.
+_rounds_meta_extract_kv() {
+  local key="$1" haystack="$2"
+  local pattern_dq pattern_sq pattern_bt pattern_token
+
+  pattern_dq="(^|[[:space:]])${key}=\"([^\"]*)\""
+  pattern_sq="(^|[[:space:]])${key}='([^']*)'"
+  pattern_bt="(^|[[:space:]])${key}=\`([^\`]*)\`"
+  pattern_token="(^|[[:space:]])${key}=([^[:space:]\"\`']+)"
+
+  if [[ "$haystack" =~ $pattern_dq ]]; then
+    printf '%s' "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  if [[ "$haystack" =~ $pattern_sq ]]; then
+    printf '%s' "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  if [[ "$haystack" =~ $pattern_bt ]]; then
+    printf '%s' "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  if [[ "$haystack" =~ $pattern_token ]]; then
+    printf '%s' "${BASH_REMATCH[2]}"
+    return 0
+  fi
+
+  return 1
+}
+
+# Strip a trailing " - rationale" segment from a dispatch line so the
+# remaining text is purely the attribute key=value section. The trailing
+# " - " separator is the canonical rationale boundary used in the schema.
+_rounds_meta_strip_rationale() {
+  local value="$1"
+
+  if [[ "$value" =~ ^(.+)[[:space:]]-[[:space:]] ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  printf '%s' "$value"
 }
 
 _rounds_meta_round_number_from_dir() {
@@ -525,11 +657,20 @@ _rounds_meta_round_number_from_dir() {
   fi
 }
 
+_rounds_meta_dispatch_cap() {
+  local cap="${REPOLENS_META_ORCH_DISPATCH_CAP:-3}"
+  if [[ ! "$cap" =~ ^[0-9]+$ || "$cap" -lt 1 ]]; then
+    cap=3
+  fi
+  printf '%s\n' "$cap"
+}
+
 _rounds_meta_prompt_vars() {
   local round="$1" next_round="$2" digest_path="$3" project_path="$4"
-  local round_total original_scope between_round_task coverage_dimension prior_output_anchor
+  local round_total original_scope between_round_task coverage_dimension prior_output_anchor dispatch_cap
 
   round_total="${CURRENT_ROUND_TOTAL:-${ROUND_TOTAL:-$next_round}}"
+  dispatch_cap="$(_rounds_meta_dispatch_cap)"
   original_scope="${ORIGINAL_BUG_REPORT_OR_SCOPE:-}"
   if [[ -z "$original_scope" ]]; then
     if [[ "${MODE:-}" == "bugreport" && -n "${BUG_REPORT:-}" ]]; then
@@ -606,6 +747,7 @@ _rounds_meta_prompt_vars() {
   printf '|BETWEEN_ROUND_TASK=%s' "$(_rounds_meta_prompt_escape_value "$between_round_task")"
   printf '|COVERAGE_DIMENSION=%s' "$(_rounds_meta_prompt_escape_value "$coverage_dimension")"
   printf '|PRIOR_OUTPUT_ANCHOR=%s' "$(_rounds_meta_prompt_escape_value "$prior_output_anchor")"
+  printf '|DISPATCH_CAP=%s' "$(_rounds_meta_prompt_escape_value "$dispatch_cap")"
 }
 
 _rounds_meta_lenses_dir() {
@@ -647,7 +789,35 @@ _rounds_meta_active_lens_entries() {
     fi
   done < <(
     jq -r --arg mode "$mode" --arg deploy_domain "$deploy_domain" \
-      '.domains | sort_by(.order)[] | (if $mode == "discover" then select(.mode == "discover") elif $mode == "deploy" then select(.mode == "deploy" and .id == $deploy_domain) elif $mode == "opensource" then select(.mode == "opensource") elif $mode == "content" then select(.mode == "content") else select(.mode != "discover" and .mode != "deploy" and .mode != "opensource" and .mode != "content") end) | .id as $d | .lenses[] | $d + "/" + .' "$domains_file"
+      '.domains | sort_by(.order)[] | (if $mode == "discover" then select(.mode == "discover") elif $mode == "deploy" then select(.mode == "deploy" and .id == $deploy_domain) elif $mode == "opensource" then select(.mode == "opensource") elif $mode == "content" then select(.mode == "content") else select(.mode != "discover" and .mode != "deploy" and .mode != "opensource" and .mode != "content") end) | .id as $d | .lenses[] | (if type == "string" then {id: ., skip_modes: []} else . end) | select(((.skip_modes // []) | index($mode)) | not) | $d + "/" + .id' "$domains_file"
+  )
+}
+
+# Mode-aware lens registry without --focus/--domain user filters.
+# Used to validate meta-orchestrator round 2+ dispatch ids: those are
+# adjacency picks across the full registry, not the user's round-1 selection.
+_rounds_meta_all_lens_entries() {
+  local lenses_dir="${1:-}" domains_file="${2:-}" mode deploy_domain entry
+
+  [[ -n "$lenses_dir" ]] || lenses_dir="$(_rounds_meta_lenses_dir)"
+  [[ -n "$domains_file" ]] || domains_file="$(_rounds_meta_domains_file)"
+  [[ -d "$lenses_dir" && -f "$domains_file" ]] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+
+  mode="${MODE:-audit}"
+  deploy_domain="deployment"
+  if [[ "$mode" == "deploy" && "${TARGET_TYPE:-server}" == "android" ]]; then
+    deploy_domain="android"
+  fi
+
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    if [[ -f "$lenses_dir/$entry.md" ]]; then
+      printf '%s\n' "$entry"
+    fi
+  done < <(
+    jq -r --arg mode "$mode" --arg deploy_domain "$deploy_domain" \
+      '.domains | sort_by(.order)[] | (if $mode == "discover" then select(.mode == "discover") elif $mode == "deploy" then select(.mode == "deploy" and .id == $deploy_domain) elif $mode == "opensource" then select(.mode == "opensource") elif $mode == "content" then select(.mode == "content") else select(.mode != "discover" and .mode != "deploy" and .mode != "opensource" and .mode != "content") end) | .id as $d | .lenses[] | (if type == "string" then {id: ., skip_modes: []} else . end) | select(((.skip_modes // []) | index($mode)) | not) | $d + "/" + .id' "$domains_file"
   )
 }
 
@@ -655,7 +825,7 @@ _rounds_meta_validate_lens_id() {
   local lens_id="$1" lenses_dir="${2:-}"
 
   [[ "$lens_id" =~ ^[A-Za-z0-9_-]+$ ]] || return 1
-  _rounds_meta_lens_entry_for_id "$lens_id" "$lenses_dir" >/dev/null
+  _rounds_meta_lens_entry_for_id_unfiltered "$lens_id" "$lenses_dir" >/dev/null
 }
 
 _rounds_meta_lens_entry_for_id() {
@@ -668,13 +838,18 @@ _rounds_meta_lens_entry_for_id() {
     [[ "${entry#*/}" == "$lens_id" ]] || continue
     printf '%s\n' "$entry"
     return 0
-  done < <(_rounds_meta_active_lens_entries "$lenses_dir" || true)
+  done < <(_rounds_meta_all_lens_entries "$lenses_dir" || true)
 
   return 1
 }
 
+_rounds_meta_lens_entry_for_id_unfiltered() {
+  _rounds_meta_lens_entry_for_id "$@"
+}
+
 _rounds_meta_dispatch_lens_entries() {
   local dispatch_file="$1" lenses_dir="${2:-}" line trimmed lens_id lens_entry
+  local lens_attrs stripped attr_body role focus anchor exclude missed_angle tuple dedup_key
   local -A seen_entries=()
 
   [[ -f "$dispatch_file" ]] || return 0
@@ -682,12 +857,27 @@ _rounds_meta_dispatch_lens_entries() {
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     trimmed="$(_rounds_meta_trim "$line")"
-    if [[ "$trimmed" =~ ^-?[[:space:]]*LENS:[[:space:]]*([A-Za-z0-9_-]+)([[:space:]]+-[[:space:]].*)?$ ]]; then
+    if [[ "$trimmed" =~ ^-?[[:space:]]*LENS:[[:space:]]*([A-Za-z0-9_-]+)([[:space:]]+.*)?$ ]]; then
       lens_id="${BASH_REMATCH[1]}"
+      lens_attrs="${BASH_REMATCH[2]:-}"
+      stripped="$(_rounds_meta_strip_rationale "$lens_attrs")"
+      attr_body="$(_rounds_meta_trim "$stripped")"
+
+      role="$(_rounds_meta_extract_kv role "$attr_body" || true)"
+      focus="$(_rounds_meta_extract_kv focus "$attr_body" || true)"
+      anchor="$(_rounds_meta_extract_kv anchor "$attr_body" || true)"
+      exclude="$(_rounds_meta_extract_kv exclude "$attr_body" || true)"
+      missed_angle="$(_rounds_meta_extract_kv missed_angle "$attr_body" || true)"
+      if [[ -z "$focus" && -n "$missed_angle" ]]; then
+        focus="$missed_angle"
+      fi
+
       if lens_entry="$(_rounds_meta_lens_entry_for_id "$lens_id" "$lenses_dir")"; then
-        if [[ -z "${seen_entries[$lens_entry]:-}" ]]; then
-          seen_entries["$lens_entry"]=1
-          printf '%s\n' "$lens_entry"
+        tuple="$(_rounds_meta_tuple_serialize "$lens_entry" "$role" "$focus" "$anchor" "$exclude")"
+        dedup_key="${lens_entry}|${role}|${focus}|${anchor}|${exclude}"
+        if [[ -z "${seen_entries[$dedup_key]:-}" ]]; then
+          seen_entries["$dedup_key"]=1
+          printf '%s\n' "$tuple"
         fi
       else
         _rounds_meta_warn "Skipping invalid dispatched lens id: $lens_id"
@@ -696,17 +886,134 @@ _rounds_meta_dispatch_lens_entries() {
   done < "$dispatch_file"
 }
 
+_rounds_meta_dispatch_generic_entries() {
+  local dispatch_file="$1" line trimmed generic_attrs stripped attr_body
+  local role focus anchor exclude missed_angle tuple slug entry dedup_key index=0
+  local -A seen_entries=()
+
+  [[ -f "$dispatch_file" ]] || return 0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    trimmed="$(_rounds_meta_trim "$line")"
+    if [[ "$trimmed" =~ ^-?[[:space:]]*GENERIC:[[:space:]]*(.*)$ ]]; then
+      generic_attrs="${BASH_REMATCH[1]}"
+      stripped="$(_rounds_meta_strip_rationale "$generic_attrs")"
+      attr_body="$(_rounds_meta_trim "$stripped")"
+
+      role="$(_rounds_meta_extract_kv role "$attr_body" || true)"
+      focus="$(_rounds_meta_extract_kv focus "$attr_body" || true)"
+      anchor="$(_rounds_meta_extract_kv anchor "$attr_body" || true)"
+      exclude="$(_rounds_meta_extract_kv exclude "$attr_body" || true)"
+      missed_angle="$(_rounds_meta_extract_kv missed_angle "$attr_body" || true)"
+      if [[ -z "$focus" && -n "$missed_angle" ]]; then
+        focus="$missed_angle"
+      fi
+
+      dedup_key="${role}|${focus}|${anchor}|${exclude}"
+      if [[ -n "${seen_entries[$dedup_key]:-}" ]]; then
+        continue
+      fi
+      seen_entries["$dedup_key"]=1
+      index=$((index + 1))
+
+      slug="$(_rounds_meta_slug "${role}-${focus}")"
+      [[ -n "$slug" ]] || slug="investigator-$index"
+      entry="generic/$slug"
+      tuple="$(_rounds_meta_tuple_serialize "$entry" "$role" "$focus" "$anchor" "$exclude")"
+      printf '%s\n' "$tuple"
+    fi
+  done < "$dispatch_file"
+}
+
+_rounds_meta_custom_focus_body() {
+  # Extract the agent-supplied focus instructions from a CUSTOM payload.
+  # If the payload contains a ```fenced block, return its inner content
+  # (de-indented to the fence's leading indent). Otherwise strip the
+  # leading `- CUSTOM:` bullet and any `Draft prompt:` label and return
+  # the remainder.
+  local payload="$1"
+  local line trimmed in_fence=0 saw_fence=0 dropped_first=0
+  local fenced_body="" fallback_body="" fence_indent=""
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    trimmed="$(_rounds_meta_trim "$line")"
+
+    if [[ "${trimmed:0:3}" == '```' ]]; then
+      if (( in_fence == 0 )); then
+        in_fence=1
+        saw_fence=1
+        fence_indent="${line%%\`*}"
+      else
+        in_fence=0
+      fi
+      continue
+    fi
+
+    if (( in_fence )); then
+      if [[ -n "$fence_indent" && "$line" == "$fence_indent"* ]]; then
+        line="${line#"$fence_indent"}"
+      fi
+      [[ -n "$fenced_body" ]] && fenced_body+=$'\n'
+      fenced_body+="$line"
+      continue
+    fi
+
+    if (( dropped_first == 0 )); then
+      dropped_first=1
+      if [[ "$trimmed" =~ ^-?[[:space:]]*CUSTOM:[[:space:]]* ]]; then
+        continue
+      fi
+    fi
+
+    if [[ "${trimmed,,}" == "draft prompt:" ]]; then
+      continue
+    fi
+
+    [[ -n "$fallback_body" ]] && fallback_body+=$'\n'
+    fallback_body+="$line"
+  done <<< "$payload"
+
+  if (( saw_fence )) && [[ -n "$fenced_body" ]]; then
+    printf '%s' "$fenced_body"
+  else
+    printf '%s' "$fallback_body"
+  fi
+}
+
 _rounds_meta_write_custom_lens() {
   local custom_lenses_dir="$1" payload="$2" index="$3"
-  local category slug lens_dir lens_file
+  local category base_slug slug lens_dir lens_file focus_body
+  local round_prefix="" collision_suffix=2
 
   category="$(_rounds_meta_custom_category_from_payload "$payload")" || return 1
-  slug="$(_rounds_meta_slug "$category")"
-  [[ -n "$slug" ]] || slug="custom-$index"
+  base_slug="$(_rounds_meta_slug "$category")"
+  [[ -n "$base_slug" ]] || base_slug="custom-$index"
+
+  # Bug 1 — cross-round disambiguation. When CURRENT_ROUND_INDEX is set
+  # (multi-round mode), prefix the slug with r<N>- so the same agent-named
+  # category in round 2 and round 3 produces distinct lens IDs.
+  if [[ -n "${CURRENT_ROUND_INDEX:-}" && "$CURRENT_ROUND_INDEX" =~ ^[0-9]+$ ]]; then
+    round_prefix="r${CURRENT_ROUND_INDEX}-"
+  fi
+
+  slug="${round_prefix}${base_slug}"
   lens_dir="$custom_lenses_dir/custom"
   lens_file="$lens_dir/$slug.md"
 
   mkdir -p "$lens_dir" || return 1
+
+  # Bug 2 — same-round collision counter. Two distinct categories that
+  # slugify identically (e.g. "Payment retry race!" and "payment-retry race")
+  # would otherwise overwrite each other. Append -2, -3, ... until we land
+  # on a free filename.
+  while [[ -e "$lens_file" ]]; do
+    slug="${round_prefix}${base_slug}-${collision_suffix}"
+    lens_file="$lens_dir/$slug.md"
+    collision_suffix=$(( collision_suffix + 1 ))
+  done
+
+  focus_body="$(_rounds_meta_custom_focus_body "$payload")"
+
   {
     printf -- '---\n'
     printf 'id: %s\n' "$slug"
@@ -716,16 +1023,50 @@ _rounds_meta_write_custom_lens() {
     printf -- '---\n'
     printf '## Your Expert Focus\n\n'
     printf 'Category: %s\n\n' "$category"
-    printf '%s\n' "$payload"
+    if [[ -n "$focus_body" ]]; then
+      printf '%s\n' "$focus_body"
+    fi
   } > "$lens_file" || return 1
 
   printf 'custom/%s\n' "$slug"
 }
 
+_rounds_meta_custom_attrs_from_payload() {
+  local payload="$1" role_var="$2" focus_var="$3" anchor_var="$4" exclude_var="$5"
+  local _attr_line _attr_trimmed _attr_header _attr_body _attr_stripped
+  local _attr_role="" _attr_focus="" _attr_anchor="" _attr_exclude="" _attr_missed_angle=""
+
+  while IFS= read -r _attr_line || [[ -n "$_attr_line" ]]; do
+    _attr_trimmed="$(_rounds_meta_trim "$_attr_line")"
+    [[ -n "$_attr_trimmed" ]] || continue
+    if [[ "$_attr_trimmed" =~ ^-?[[:space:]]*CUSTOM:[[:space:]]*(.+)$ ]]; then
+      _attr_header="${BASH_REMATCH[1]}"
+      _attr_stripped="$(_rounds_meta_strip_rationale "$_attr_header")"
+      _attr_body="$(_rounds_meta_trim "$_attr_stripped")"
+
+      _attr_role="$(_rounds_meta_extract_kv role "$_attr_body" || true)"
+      _attr_focus="$(_rounds_meta_extract_kv focus "$_attr_body" || true)"
+      _attr_anchor="$(_rounds_meta_extract_kv anchor "$_attr_body" || true)"
+      _attr_exclude="$(_rounds_meta_extract_kv exclude "$_attr_body" || true)"
+      _attr_missed_angle="$(_rounds_meta_extract_kv missed_angle "$_attr_body" || true)"
+      if [[ -z "$_attr_focus" && -n "$_attr_missed_angle" ]]; then
+        _attr_focus="$_attr_missed_angle"
+      fi
+    fi
+    break
+  done <<< "$payload"
+
+  printf -v "$role_var" '%s' "$_attr_role"
+  printf -v "$focus_var" '%s' "$_attr_focus"
+  printf -v "$anchor_var" '%s' "$_attr_anchor"
+  printf -v "$exclude_var" '%s' "$_attr_exclude"
+}
+
 _rounds_meta_dispatch_custom_entries() {
   local dispatch_file="$1" custom_lenses_dir="$2"
   local line trimmed payload="" custom_entry index=0
-  local in_custom=0
+  local role="" focus="" anchor="" exclude="" tuple
+  local in_custom=0 in_fence=0
   local -A seen_entries=()
 
   [[ -f "$dispatch_file" ]] || return 0
@@ -733,21 +1074,32 @@ _rounds_meta_dispatch_custom_entries() {
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     trimmed="$(_rounds_meta_trim "$line")"
-    if (( in_custom )) && _rounds_meta_dispatch_boundary "$trimmed"; then
+
+    if (( in_custom )) && [[ "${trimmed:0:3}" == '```' ]]; then
+      in_fence=$(( 1 - in_fence ))
+      payload+=$'\n'"$line"
+      continue
+    fi
+
+    if (( in_custom )) && (( in_fence == 0 )) && _rounds_meta_dispatch_boundary "$trimmed"; then
       index=$((index + 1))
       if custom_entry="$(_rounds_meta_write_custom_lens "$custom_lenses_dir" "$payload" "$index")"; then
         if [[ -z "${seen_entries[$custom_entry]:-}" ]]; then
           seen_entries["$custom_entry"]=1
-          printf '%s\n' "$custom_entry"
+          _rounds_meta_custom_attrs_from_payload "$payload" role focus anchor exclude
+          tuple="$(_rounds_meta_tuple_serialize "$custom_entry" "$role" "$focus" "$anchor" "$exclude")"
+          printf '%s\n' "$tuple"
         fi
       fi
       payload=""
       in_custom=0
+      in_fence=0
     fi
 
-    if [[ "$trimmed" =~ ^-?[[:space:]]*CUSTOM:[[:space:]]*(.+)$ ]]; then
+    if (( in_fence == 0 )) && [[ "$trimmed" =~ ^-?[[:space:]]*CUSTOM:[[:space:]]*(.+)$ ]]; then
       payload="$trimmed"
       in_custom=1
+      in_fence=0
       continue
     fi
 
@@ -757,11 +1109,16 @@ _rounds_meta_dispatch_custom_entries() {
   done < "$dispatch_file"
 
   if (( in_custom )); then
+    if (( in_fence )); then
+      _rounds_meta_warn "Custom dispatch payload reached EOF with an unclosed fence; flushing as-is."
+    fi
     index=$((index + 1))
     if custom_entry="$(_rounds_meta_write_custom_lens "$custom_lenses_dir" "$payload" "$index")"; then
       if [[ -z "${seen_entries[$custom_entry]:-}" ]]; then
         seen_entries["$custom_entry"]=1
-        printf '%s\n' "$custom_entry"
+        _rounds_meta_custom_attrs_from_payload "$payload" role focus anchor exclude
+        tuple="$(_rounds_meta_tuple_serialize "$custom_entry" "$role" "$focus" "$anchor" "$exclude")"
+        printf '%s\n' "$tuple"
       fi
     fi
   fi
@@ -773,7 +1130,7 @@ _rounds_meta_dispatch_has_entries() {
   [[ -f "$dispatch_file" ]] || return 1
   while IFS= read -r line || [[ -n "$line" ]]; do
     trimmed="$(_rounds_meta_trim "$line")"
-    if [[ "$trimmed" =~ ^-?[[:space:]]*(LENS|CUSTOM):[[:space:]]* ]]; then
+    if [[ "$trimmed" =~ ^-?[[:space:]]*(LENS|CUSTOM|GENERIC):[[:space:]]* ]]; then
       return 0
     fi
   done < "$dispatch_file"
@@ -816,7 +1173,7 @@ _rounds_meta_extract_hypotheses() {
     fi
 
     if [[ "$trimmed" =~ ^#{1,6}[[:space:]]+ ]] \
-        || [[ "$trimmed" =~ ^-?[[:space:]]*(LENS|CUSTOM):[[:space:]]* ]]; then
+        || [[ "$trimmed" =~ ^-?[[:space:]]*(LENS|CUSTOM|GENERIC):[[:space:]]* ]]; then
       break
     fi
 
@@ -829,9 +1186,11 @@ _rounds_meta_extract_hypotheses() {
 _rounds_meta_parse_output() {
   local output_file="$1" dispatch_file="$2" hypotheses_file="$3" lenses_dir="${4:-}"
   local dispatch_dir hypotheses_dir tmp_dispatch line trimmed lens_id custom_payload custom_category
-  local in_custom=0
-  local -a lens_ids=() custom_payloads=()
-  local -A seen_lenses=() seen_custom=()
+  local lens_attrs lens_dispatch_line generic_attrs generic_dispatch_line stripped attr_body
+  local role focus anchor exclude missed_angle dedup_key
+  local in_custom=0 in_fence=0
+  local -a lens_dispatch_lines=() custom_payloads=() generic_dispatch_lines=()
+  local -A seen_lens_keys=() seen_custom=() seen_generic_keys=()
 
   [[ -n "$lenses_dir" ]] || lenses_dir="$(_rounds_meta_lenses_dir)"
   dispatch_dir="${dispatch_file%/*}"
@@ -841,7 +1200,13 @@ _rounds_meta_parse_output() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     trimmed="$(_rounds_meta_trim "$line")"
 
-    if (( in_custom )) && _rounds_meta_dispatch_boundary "$trimmed"; then
+    if (( in_custom )) && [[ "${trimmed:0:3}" == '```' ]]; then
+      in_fence=$(( 1 - in_fence ))
+      custom_payload+=$'\n'"$line"
+      continue
+    fi
+
+    if (( in_custom )) && (( in_fence == 0 )) && _rounds_meta_dispatch_boundary "$trimmed"; then
       custom_category="$(_rounds_meta_custom_category_from_payload "$custom_payload")"
       if [[ -n "$custom_category" && -z "${seen_custom[$custom_category]:-}" ]]; then
         seen_custom["$custom_category"]=1
@@ -849,6 +1214,7 @@ _rounds_meta_parse_output() {
       fi
       custom_payload=""
       in_custom=0
+      in_fence=0
     fi
 
     if (( in_custom )); then
@@ -858,15 +1224,73 @@ _rounds_meta_parse_output() {
 
     [[ -n "$trimmed" ]] || continue
 
-    if [[ "$trimmed" =~ ^-?[[:space:]]*LENS:[[:space:]]*([A-Za-z0-9_-]+)([[:space:]]+-[[:space:]].*)?$ ]]; then
+    if [[ "$trimmed" =~ ^-?[[:space:]]*LENS:[[:space:]]*([A-Za-z0-9_-]+)([[:space:]]+.*)?$ ]]; then
       lens_id="${BASH_REMATCH[1]}"
+      lens_attrs="${BASH_REMATCH[2]:-}"
+      stripped="$(_rounds_meta_strip_rationale "$lens_attrs")"
+      attr_body="$(_rounds_meta_trim "$stripped")"
+
+      role="$(_rounds_meta_extract_kv role "$attr_body" || true)"
+      focus="$(_rounds_meta_extract_kv focus "$attr_body" || true)"
+      anchor="$(_rounds_meta_extract_kv anchor "$attr_body" || true)"
+      exclude="$(_rounds_meta_extract_kv exclude "$attr_body" || true)"
+      missed_angle="$(_rounds_meta_extract_kv missed_angle "$attr_body" || true)"
+      if [[ -z "$focus" && -n "$missed_angle" ]]; then
+        focus="$missed_angle"
+      fi
+
       if _rounds_meta_validate_lens_id "$lens_id" "$lenses_dir"; then
-        if [[ -z "${seen_lenses[$lens_id]:-}" ]]; then
-          seen_lenses["$lens_id"]=1
-          lens_ids+=("$lens_id")
+        dedup_key="${lens_id}|${role}|${focus}|${anchor}|${exclude}"
+        if [[ -z "${seen_lens_keys[$dedup_key]:-}" ]]; then
+          seen_lens_keys["$dedup_key"]=1
+          lens_dispatch_line="LENS: $lens_id"
+          [[ -n "$role" ]] && lens_dispatch_line+=" role=$role"
+          if [[ -n "$focus" ]]; then
+            if [[ "$focus" == *[[:space:]]* ]]; then
+              lens_dispatch_line+=" focus=\"$focus\""
+            else
+              lens_dispatch_line+=" focus=$focus"
+            fi
+          fi
+          [[ -n "$anchor" ]] && lens_dispatch_line+=" anchor=$anchor"
+          [[ -n "$exclude" ]] && lens_dispatch_line+=" exclude=$exclude"
+          lens_dispatch_lines+=("$lens_dispatch_line")
         fi
       else
-        _rounds_meta_warn "Dropping hallucinated meta-orchestrator lens id: $lens_id"
+        _rounds_meta_warn "Dropping unregistered meta-orchestrator lens id: $lens_id"
+      fi
+      continue
+    fi
+
+    if [[ "$trimmed" =~ ^-?[[:space:]]*GENERIC:[[:space:]]*(.*)$ ]]; then
+      generic_attrs="${BASH_REMATCH[1]}"
+      stripped="$(_rounds_meta_strip_rationale "$generic_attrs")"
+      attr_body="$(_rounds_meta_trim "$stripped")"
+
+      role="$(_rounds_meta_extract_kv role "$attr_body" || true)"
+      focus="$(_rounds_meta_extract_kv focus "$attr_body" || true)"
+      anchor="$(_rounds_meta_extract_kv anchor "$attr_body" || true)"
+      exclude="$(_rounds_meta_extract_kv exclude "$attr_body" || true)"
+      missed_angle="$(_rounds_meta_extract_kv missed_angle "$attr_body" || true)"
+      if [[ -z "$focus" && -n "$missed_angle" ]]; then
+        focus="$missed_angle"
+      fi
+
+      dedup_key="${role}|${focus}|${anchor}|${exclude}"
+      if [[ -z "${seen_generic_keys[$dedup_key]:-}" ]]; then
+        seen_generic_keys["$dedup_key"]=1
+        generic_dispatch_line="GENERIC:"
+        [[ -n "$role" ]] && generic_dispatch_line+=" role=$role"
+        if [[ -n "$focus" ]]; then
+          if [[ "$focus" == *[[:space:]]* ]]; then
+            generic_dispatch_line+=" focus=\"$focus\""
+          else
+            generic_dispatch_line+=" focus=$focus"
+          fi
+        fi
+        [[ -n "$anchor" ]] && generic_dispatch_line+=" anchor=$anchor"
+        [[ -n "$exclude" ]] && generic_dispatch_line+=" exclude=$exclude"
+        generic_dispatch_lines+=("$generic_dispatch_line")
       fi
       continue
     fi
@@ -874,10 +1298,14 @@ _rounds_meta_parse_output() {
     if [[ "$trimmed" =~ ^-?[[:space:]]*CUSTOM:[[:space:]]*(.+)$ ]]; then
       custom_payload="$trimmed"
       in_custom=1
+      in_fence=0
     fi
   done < "$output_file"
 
   if (( in_custom )); then
+    if (( in_fence )); then
+      _rounds_meta_warn "Meta-orchestrator output reached EOF with an unclosed CUSTOM fence; flushing as-is."
+    fi
     custom_category="$(_rounds_meta_custom_category_from_payload "$custom_payload")"
     if [[ -n "$custom_category" && -z "${seen_custom[$custom_category]:-}" ]]; then
       seen_custom["$custom_category"]=1
@@ -885,15 +1313,55 @@ _rounds_meta_parse_output() {
     fi
   fi
 
+  # Bug 3 — enforce REPOLENS_META_ORCH_DISPATCH_CAP across LENS+GENERIC+CUSTOM.
+  # The cap is advisory in the prompt; if the agent emits more, drop the
+  # surplus from the tail (preserving the agent's prioritized ordering:
+  # LENS first, then GENERIC, then CUSTOM).
+  local dispatch_cap total_dispatches lens_count generic_count custom_count
+  local lens_kept generic_kept custom_kept
+  dispatch_cap="$(_rounds_meta_dispatch_cap)"
+  lens_count="${#lens_dispatch_lines[@]}"
+  generic_count="${#generic_dispatch_lines[@]}"
+  custom_count="${#custom_payloads[@]}"
+  total_dispatches=$(( lens_count + generic_count + custom_count ))
+  lens_kept="$lens_count"
+  generic_kept="$generic_count"
+  custom_kept="$custom_count"
+  if (( total_dispatches > dispatch_cap )); then
+    local remaining="$dispatch_cap"
+    if (( lens_kept > remaining )); then
+      lens_kept="$remaining"
+    fi
+    remaining=$(( remaining - lens_kept ))
+    if (( generic_kept > remaining )); then
+      generic_kept="$remaining"
+    fi
+    remaining=$(( remaining - generic_kept ))
+    if (( custom_kept > remaining )); then
+      custom_kept="$remaining"
+    fi
+    _rounds_meta_warn "Meta-orchestrator dispatch cap enforced: kept $dispatch_cap of $total_dispatches dispatches (cap=$dispatch_cap)."
+  fi
+
   tmp_dispatch="${dispatch_file}.tmp.$$"
   {
     printf '# Meta-Orchestrator Dispatch\n\n'
-    for lens_id in "${lens_ids[@]}"; do
-      printf 'LENS: %s\n' "$lens_id"
-    done
-    for custom_payload in "${custom_payloads[@]}"; do
-      printf '%s\n' "$custom_payload"
-    done
+    local _cap_idx=0
+    if (( lens_kept > 0 )); then
+      for ((_cap_idx = 0; _cap_idx < lens_kept; _cap_idx++)); do
+        printf '%s\n' "${lens_dispatch_lines[$_cap_idx]}"
+      done
+    fi
+    if (( generic_kept > 0 )); then
+      for ((_cap_idx = 0; _cap_idx < generic_kept; _cap_idx++)); do
+        printf '%s\n' "${generic_dispatch_lines[$_cap_idx]}"
+      done
+    fi
+    if (( custom_kept > 0 )); then
+      for ((_cap_idx = 0; _cap_idx < custom_kept; _cap_idx++)); do
+        printf '%s\n' "${custom_payloads[$_cap_idx]}"
+      done
+    fi
   } > "$tmp_dispatch" || {
     rm -f "$tmp_dispatch"
     return 1
@@ -1613,12 +2081,14 @@ build_round_digest() {
 }
 
 _rounds_record_skipped_lenses() {
-  local skip_entry skip_domain skip_lens
+  local skip_entry skip_domain skip_lens entry_part
 
   for skip_entry in "$@"; do
-    skip_domain="${skip_entry%%/*}"
-    skip_lens="${skip_entry#*/}"
-    if ! is_lens_completed "$skip_entry"; then
+    # Strip role/focus/anchor/exclude tuple suffix, if present.
+    entry_part="${skip_entry%%|*}"
+    skip_domain="${entry_part%%/*}"
+    skip_lens="${entry_part#*/}"
+    if ! is_lens_completed "$entry_part"; then
       record_lens "$SUMMARY_FILE" "$skip_domain" "$skip_lens" 0 "skipped" 0 0
     fi
   done
@@ -1694,6 +2164,101 @@ _rounds_build_prior_digest_context() {
   printf '%s' "$context_path"
 }
 
+# _rounds_wave_width
+#   Returns the wave-1 dispatch fanout cap. Defaults to 7. The cap is clamped
+#   to [1, 50] to defend against pathological inputs from env or future flags.
+_rounds_wave_width() {
+  local raw="${REPOLENS_WAVE_WIDTH:-7}"
+  if ! [[ "$raw" =~ ^[1-9][0-9]*$ ]]; then
+    raw=7
+  fi
+  if (( raw > 50 )); then
+    raw=50
+  fi
+  printf '%s\n' "$raw"
+}
+
+# _rounds_sanitize_seed <raw_seed>
+#   Sanitizes a single seed line for embedding in a dispatch attribute. Strips
+#   control characters, collapses whitespace, and escapes characters that
+#   could break the GENERIC: key=value tokenizer (pipe, backtick, quote).
+_rounds_sanitize_seed() {
+  local seed="${1:-}"
+  seed="${seed//$'\r'/}"
+  seed="${seed//$'\n'/ }"
+  seed="${seed//$'\t'/ }"
+  seed="${seed//|/ }"
+  seed="${seed//\`/ }"
+  seed="${seed//\"/ }"
+  seed="$(printf '%s' "$seed" | tr -s '[:space:]' ' ')"
+  seed="${seed#"${seed%%[![:space:]]*}"}"
+  seed="${seed%"${seed##*[![:space:]]}"}"
+  printf '%s' "$seed"
+}
+
+# _rounds_select_wave_1 <run_id>
+#   Bugreport+waves round 1 selector. Reads the auditable seeds file produced
+#   by run_triage and emits a synthetic dispatch.md under
+#   logs/<run>/rounds/round-0/. Each non-empty seed becomes one
+#   `GENERIC: role=broader focus="<seed>"` directive, clamped to
+#   REPOLENS_WAVE_WIDTH (default 7).
+#
+#   Returns 0 on success regardless of how many seeds were emitted. If the
+#   seeds file is missing, empty, or yields zero usable seeds, no dispatch
+#   file is created and the caller falls back to the full lens list.
+#
+#   This function does not invoke any agent. It is pure file IO over the
+#   triage output and is safe to call multiple times.
+_rounds_select_wave_1() {
+  local run_id="${1:-${RUN_ID:-}}"
+  local base="${LOG_BASE:-}"
+  [[ -n "$base" ]] || return 1
+
+  local seeds_file="$base/triage/investigation-seeds.txt"
+  if [[ ! -f "$seeds_file" ]]; then
+    return 1
+  fi
+
+  local wave_width
+  wave_width="$(_rounds_wave_width)"
+
+  local round0_dir="$base/rounds/round-0"
+  local dispatch_path="$round0_dir/dispatch.md"
+  local tmp_path="$dispatch_path.tmp.$$"
+
+  mkdir -p "$round0_dir" || return 1
+  : > "$tmp_path" || return 1
+  printf '# Wave-1 Dispatch (triage investigation seeds)\n\n' >> "$tmp_path"
+
+  local seed clean count=0
+  while IFS= read -r seed || [[ -n "$seed" ]]; do
+    [[ -n "$seed" ]] || continue
+    clean="$(_rounds_sanitize_seed "$seed")"
+    [[ -n "$clean" ]] || continue
+    count=$((count + 1))
+    if (( count > wave_width )); then
+      count=$wave_width
+      break
+    fi
+    printf 'GENERIC: role=broader focus="%s"\n' "$clean" >> "$tmp_path"
+  done < "$seeds_file"
+
+  if (( count == 0 )); then
+    rm -f "$tmp_path"
+    return 1
+  fi
+
+  if ! mv "$tmp_path" "$dispatch_path"; then
+    rm -f "$tmp_path"
+    return 1
+  fi
+
+  if declare -F log_info >/dev/null 2>&1; then
+    log_info "[round 1] Wave-1 selection wrote $count GENERIC dispatch(es) to $dispatch_path"
+  fi
+  return 0
+}
+
 run_rounds() {
   local rounds_total="$1" lens_list_var="$2"
   local -a lens_list=() active_lens_list=()
@@ -1701,7 +2266,7 @@ run_rounds() {
   local original_completed_lenses_file had_completed_lenses_file
   local round_completed_lenses_file round_completed_lenses_dir round_rc
   local current_round_dir prior_digest_path previous_hypotheses_path current_hypotheses_path
-  local dispatch_path dispatched_lenses_output dispatched_custom_output
+  local dispatch_path dispatched_lenses_output dispatched_custom_output dispatched_generic_output
   local round_custom_lenses_dir dispatch_has_entries abort_reason
 
   if [[ ! "$rounds_total" =~ ^[1-9][0-9]*$ ]]; then
@@ -1729,6 +2294,17 @@ run_rounds() {
 
     if (( rounds_total > 1 )); then
       dispatch_path=""
+      if (( round == 1 )) \
+          && [[ "${MODE:-}" == "bugreport" ]] \
+          && [[ "${STRATEGY:-}" == "waves" ]]; then
+        if _rounds_select_wave_1 "${RUN_ID:-}"; then
+          dispatch_path="${LOG_BASE:-}/rounds/round-0/dispatch.md"
+        else
+          if declare -F log_info >/dev/null 2>&1; then
+            log_info "[round 1] No usable investigation seeds; falling back to full-fanout lens list"
+          fi
+        fi
+      fi
       if (( round > 1 )); then
         local previous_round_dir
         previous_round_dir="$(round_dir "${RUN_ID:-}" "$((round - 1))")" || return $?
@@ -1738,14 +2314,18 @@ run_rounds() {
         dispatched_lenses_output="$(_rounds_meta_dispatch_lens_entries "$dispatch_path")"
         round_custom_lenses_dir="${dispatch_path%/*}/custom-lenses"
         dispatched_custom_output="$(_rounds_meta_dispatch_custom_entries "$dispatch_path" "$round_custom_lenses_dir")"
+        dispatched_generic_output="$(_rounds_meta_dispatch_generic_entries "$dispatch_path")"
         if _rounds_meta_dispatch_has_entries "$dispatch_path"; then
           dispatch_has_entries=1
         fi
-        if [[ -n "$dispatched_lenses_output" || -n "$dispatched_custom_output" || "$dispatch_has_entries" -eq 1 ]]; then
+        if [[ -n "$dispatched_lenses_output" || -n "$dispatched_custom_output" || -n "$dispatched_generic_output" || "$dispatch_has_entries" -eq 1 ]]; then
           active_lens_list=()
           while IFS= read -r lens_entry; do
             [[ -n "$lens_entry" ]] && active_lens_list+=("$lens_entry")
           done <<< "$dispatched_lenses_output"
+          while IFS= read -r lens_entry; do
+            [[ -n "$lens_entry" ]] && active_lens_list+=("$lens_entry")
+          done <<< "$dispatched_generic_output"
           while IFS= read -r lens_entry; do
             [[ -n "$lens_entry" ]] && active_lens_list+=("$lens_entry")
           done <<< "$dispatched_custom_output"
