@@ -1761,6 +1761,10 @@ if [[ -n "$RESUME_RUN_ID" && -f "$LOG_BASE/.rate-limit-sleep-interrupt" ]]; then
   rm -f "$LOG_BASE/.rate-limit-sleep-interrupt" "$LOG_BASE/.rate-limit-sleep-interrupt.tmp."*
   clear_stop_reason "$SUMMARY_FILE"
 fi
+if [[ -n "$RESUME_RUN_ID" && -f "$LOG_BASE/.rate-limit-sleep-interrupt" ]]; then
+  rm -f "$LOG_BASE/.rate-limit-sleep-interrupt" "$LOG_BASE/.rate-limit-sleep-interrupt.tmp."*
+  clear_stop_reason "$SUMMARY_FILE"
+fi
 if [[ -n "$RESUME_RUN_ID" && -f "$LOG_BASE/.systemic-failure-abort" ]]; then
   rm -f "$LOG_BASE/.systemic-failure-abort"
   clear_stop_reason "$SUMMARY_FILE"
