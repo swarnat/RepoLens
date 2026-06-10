@@ -32,12 +32,16 @@ Options:
   --mode <mode>      Optional RepoLens mode. Uses RepoLens default if omitted.
   --domain <domain>  Optional RepoLens domain. Default: $REPOLENS_DOMAIN
   --branch <name>    Optional branch, tag, or ref to checkout.
+  --min-severity <level>
+                     Only file findings at or above level: critical|high|medium|low.
+                     Default: $REPOLENS_MIN_SEVERITY
   --local            Pass --local to RepoLens instead of filing GitLab issues.
   -h, --help         Show this help text.
 
 Environment alternatives:
   GITLAB_REPO        Same as --repo
   GITLAB_TOKEN       Same as --token
+  REPOLENS_MIN_SEVERITY  Same as --min-severity
 
 Any arguments after "--" are forwarded to repolens.sh.
 USAGE
@@ -54,6 +58,7 @@ project_dir="${REPOLENS_PROJECT_DIR:-/project}"
 agent="${REPOLENS_AGENT:-opencode}"
 mode="${REPOLENS_MODE:-}"
 domain="${REPOLENS_DOMAIN:-}"
+min_severity="${REPOLENS_MIN_SEVERITY:-}"
 mode_or_domain_set=0
 branch=""
 local_mode=0
@@ -104,6 +109,11 @@ while (($#)); do
     --branch|--ref)
       [[ $# -ge 2 ]] || die "$1 requires a value"
       branch="$2"
+      shift 2
+      ;;
+    --min-severity)
+      [[ $# -ge 2 ]] || die "--min-severity requires a value"
+      min_severity="$2"
       shift 2
       ;;
     --local)
@@ -181,6 +191,9 @@ else
 fi
 if ((local_mode)); then
   repolens_args+=(--local)
+fi
+if [[ -n "$min_severity" ]]; then
+  repolens_args+=(--min-severity "$min_severity")
 fi
 repolens_args+=("${extra_args[@]}")
 
