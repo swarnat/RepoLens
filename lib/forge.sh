@@ -30,6 +30,7 @@ set -uo pipefail
 #                                                      plain-HTTP rejection so the
 #                                                      two functions stay consistent)
 #     anything else / malformed           -> unknown
+
 #
 #   Supported URL forms:
 #     https://[user@]host[:port]/owner/repo[.git]
@@ -567,7 +568,37 @@ forge_label_list_names() {
       fi
       return 0
       ;;
-
+    glab)
+      local _glab_host=""
+      if [[ -n "${FORGE_HOST:-}" ]]; then
+        _glab_host="${FORGE_HOST}"
+        if [[ "$_glab_host" =~ ^https?://([^/:]+) ]]; then _glab_host="${BASH_REMATCH[1]}"; fi
+        [[ "$_glab_host" == "gitlab.com" ]] && _glab_host=""
+      fi
+      local glab_err glab_out glab_rc
+      glab_err="$(mktemp 2>/dev/null)" || glab_err=""
+      if [[ -n "$glab_err" ]]; then
+        glab_out="$(GITLAB_HOST="$_glab_host" glab label list -R "$repo" --output json 2>"$glab_err")"
+        glab_rc=$?
+      else
+        glab_out="$(GITLAB_HOST="$_glab_host" glab label list -R "$repo" --output json 2>/dev/null)"
+        glab_rc=$?
+      fi
+      if [[ "$glab_rc" -ne 0 ]]; then
+        local first_err=""
+        if [[ -n "$glab_err" && -s "$glab_err" ]]; then
+          first_err="$(head -n1 "$glab_err" 2>/dev/null || true)"
+        fi
+        [[ -n "$glab_err" ]] && rm -f "$glab_err"
+        _forge_warn "forge_label_list_names: glab failed for repo=$repo rc=$glab_rc err=${first_err:-<empty>}"
+        return 1
+      fi
+      [[ -n "$glab_err" ]] && rm -f "$glab_err"
+      if ! printf '%s' "$glab_out" | jq -r '.[].name // empty' 2>/dev/null; then
+        _forge_warn "forge_label_list_names: jq failed to parse glab output for repo=$repo"
+        return 1
+      fi
+      ;;
     tea)
       local -a tea_target_flags=()
       if [[ -n "${FORGE_PROJECT_PATH:-}" ]]; then
